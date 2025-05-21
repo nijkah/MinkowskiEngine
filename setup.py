@@ -307,6 +307,8 @@ ARGS = SOURCE_SETS[target][3]
 CC_FLAGS += ARGS
 NVCC_FLAGS += ARGS
 
+NVCC_FLAGS += ["--system-include=/usr/local/linux-headers-5.4/include"]
+
 ext_modules = [
     Extension(
         name="MinkowskiEngineBackend._C",
