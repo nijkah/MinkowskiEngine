@@ -54,6 +54,7 @@ except ImportError:
     raise ImportError("Pytorch not found. Please install pytorch first.")
 
 import codecs
+import ctypes.util
 import os
 import re
 import subprocess
@@ -119,8 +120,18 @@ def _argparse(pattern, argv, is_flag=True, is_list=False):
                 return arr[0].split("=")[1], argv
 
 
-run_command("rm", "-rf", "build")
-run_command("pip", "uninstall", "MinkowskiEngine", "-y")
+# Only run destructive cleanup when invoked directly (not via pip build isolation)
+if "PIP_BUILD_TRACKER" not in os.environ and any(
+    cmd in argv for cmd in ["install", "develop", "bdist_wheel"]
+):
+    try:
+        run_command("rm", "-rf", "build")
+    except Exception:
+        pass
+    try:
+        run_command("pip", "uninstall", "MinkowskiEngine", "-y")
+    except Exception:
+        pass
 
 # For cpu only build
 CPU_ONLY, argv = _argparse("--cpu_only", argv)
@@ -197,22 +208,64 @@ if not (BLAS is False):  # False only when not set, str otherwise
     if not (BLAS_LIBRARY_DIRS is False):
         extra_link_args += [f"-Wl,-rpath,{BLAS_LIBRARY_DIRS}"]
 else:
-    # find the default BLAS library
-    import numpy.distutils.system_info as sysinfo
+    # find the default BLAS library using multiple strategies
+    import numpy
 
-    # Search blas in this order
-    for blas in BLAS_LIST:
-        if "libraries" in sysinfo.get_info(blas):
-            BLAS = blas
-            libraries += sysinfo.get_info(blas)["libraries"]
-            break
-    else:
-        # BLAS not found
+    _blas_found = False
+
+    # Strategy 1: numpy.show_config('dicts') (NumPy >= 1.24)
+    if not _blas_found:
+        try:
+            _cfg = numpy.show_config(mode='dicts')
+            _blas_info = _cfg.get('Build Dependencies', {}).get('blas', {})
+            _blas_name = _blas_info.get('name', '').lower()
+            if _blas_name:
+                for blas in BLAS_LIST:
+                    if blas in _blas_name:
+                        BLAS = blas
+                        if blas == 'mkl':
+                            libraries.append('mkl_rt')
+                            CC_FLAGS.append('-DUSE_MKL')
+                            NVCC_FLAGS.append('-DUSE_MKL')
+                        else:
+                            libraries.append(blas)
+                        _blas_found = True
+                        break
+        except (TypeError, AttributeError):
+            pass
+
+    # Strategy 2: numpy.distutils (NumPy < 2.0 fallback)
+    if not _blas_found:
+        try:
+            import numpy.distutils.system_info as sysinfo
+            for blas in BLAS_LIST:
+                if "libraries" in sysinfo.get_info(blas):
+                    BLAS = blas
+                    libraries += sysinfo.get_info(blas)["libraries"]
+                    _blas_found = True
+                    break
+        except (ImportError, ModuleNotFoundError):
+            pass
+
+    # Strategy 3: ctypes.util.find_library() probe
+    if not _blas_found:
+        for blas in BLAS_LIST:
+            if ctypes.util.find_library(blas):
+                BLAS = blas
+                if blas == 'mkl':
+                    libraries.append('mkl_rt')
+                    CC_FLAGS.append('-DUSE_MKL')
+                    NVCC_FLAGS.append('-DUSE_MKL')
+                else:
+                    libraries.append(blas)
+                _blas_found = True
+                break
+
+    if not _blas_found:
         raise ImportError(
-            ' \
-\nBLAS not found from numpy.distutils.system_info.get_info. \
-\nPlease specify BLAS with: python setup.py install --blas=openblas" \
-\nfor more information, please visit https://github.com/NVIDIA/MinkowskiEngine/wiki/Installation'
+            '\nBLAS not found. '
+            '\nPlease specify BLAS with: python setup.py install --blas=openblas'
+            '\nfor more information, please visit https://github.com/NVIDIA/MinkowskiEngine/wiki/Installation'
         )
 
 print(f"\nUsing BLAS={BLAS}")
